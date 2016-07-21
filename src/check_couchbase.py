@@ -25,6 +25,8 @@ import json
 import sys
 import subprocess
 import re
+import time
+from datetime import datetime
 
 nagios_codes = {
     'OK': 0,
@@ -132,6 +134,36 @@ def check_vbucket(stat_name, message, divide, result):
         stat_value = samples[stat_name].pop()
     check_levels(message, stat_value, divide)
 
+def check_fragmentation(result):
+    """checks cluster disk fragmentation"""
+    if result is None:
+        status_value = 0
+    else:
+        op = result['op']
+        samples = op['samples']
+        status_value = samples['couch_docs_fragmentation'].pop()
+    check_levels('Disk fragmentation percentage', status_value, True)
+
+def check_queue_filling(result):
+    """checks queue filling rate"""
+    if result is None:
+        status_value = 0
+    else:
+        op = result['op']
+        samples = op['samples']
+        status_value = samples['ep_diskqueue_fill'].pop()
+    check_levels('Queue filling rate', status_value, True)
+
+def check_queue_draining(result):
+    """checks queue draining rate"""
+    if result is None:
+        status_value = 0
+    else:
+        op = result['op']
+        samples = op['samples']
+        status_value = samples['ep_diskqueue_drain'].pop()
+    check_levels('Queue draining rate', status_value, True)
+
 
 def check_gets_per_sec(result):
     """number of gets operations per sec from specific bucket"""
@@ -206,13 +238,29 @@ def check_disk_creates_per_sec(result):
 def check_cache_miss_ratio():
     """percentage of reads per second to specific bucket which required a read
     from disk rather than RAM."""
-    ep_bg_fetched = get_status('ep_bg_fetched')
-    cmd_get = get_status('cmd_get')
-    if cmd_get == 0:
-        check_levels('CB cache miss ratio', 0, False)
+    if result is None:
+  	ep_bg_fetched = get_status('ep_bg_fetched')
+ 	cmd_get = get_status('cmd_get')
+	if cmd_get == 0:
+            check_levels('CB cache miss ratio', 0, False)
+        else:
+            status_value = int(ep_bg_fetched * 1.0 / cmd_get)
+            check_levels('CB cache miss ratio', status_value, False)
     else:
-        status_value = ep_bg_fetched * 1.0 / cmd_get
+        op = result['op']
+        samples = op['samples']
+        status_value = samples['ep_cache_miss_rate'].pop()
         check_levels('CB cache miss ratio', status_value, False)
+
+def check_index_ram_percent():
+    """percentage of  RAM used by indexes"""
+    if result is None:
+        print "result not defined, check REST petition"
+    else:
+        op = result['stats']
+        index = op['@index']
+        status_value = samples['index_ram_percent'].pop()
+        check_levels('Index RAM usage', status_value, False)
 
 
 def check_disk_reads_per_sec(result):
@@ -285,7 +333,7 @@ def check_percent_memory_used(result):
         samples = op['samples']
         mem_used = samples['mem_used'].pop()
         max_size = samples['ep_max_size'].pop()
-    status_value = mem_used / max_size * 100
+    status_value = (100 * mem_used) / max_size 
     check_levels('CB percentage of memory used', status_value, False)
 
 
@@ -408,7 +456,14 @@ def which_argument(result):
         check_disk_write_queue(result)
     if options.gets_per_sec:
         check_gets_per_sec(result)
-
+    if options.fragmentation:
+        check_fragmentation(result)
+    if options.qfill:
+        check_queue_filling(result)
+    if options.hostindexram:
+        check_index_ram_percent(result2)
+    if options.qdrain:
+        check_queue_draining(result)
     if options.vbucket_count and options.vbucket:
         if options.active:
             check_vbucket('vb_active_num', 'CB active vBucket count',
@@ -565,6 +620,9 @@ parser.add_option('--memory-used', action='callback',
 parser.add_option('--percent-memory-used', action='callback',
     callback=option_none, dest='percent_memory_used',
     help='Percentage of memory used for specific bucket on Couchbase')
+parser.add_option('-F', action='callback', dest='fragmentation',
+	callback=option_none, 
+    help='Percentage of Cluster Disk fragmentation')
 parser.add_option('--disk-reads-per-sec', action='callback',
     callback=option_none,  dest='disk_reads_per_sec',
     help='Disk reads per second for specific bucket on Couchbase')
@@ -610,6 +668,15 @@ parser.add_option('--vbucket-count', action='callback',
 parser.add_option('--vbucket', action='callback',
     callback=option_none, dest='vbucket',
     help='Any of vBuckets resources checks')
+parser.add_option('--queue-drain', action='callback',
+    callback=option_none, dest='qdrain',
+    help='Queue draining rate')
+parser.add_option('--queue-fill', action='callback',
+    callback=option_none, dest='qfill',
+    help='Queue filling rate')
+parser.add_option('--host-index-ram', action='callback',
+    callback=option_none, dest='hostindexram',
+    help='Node Index Ram Percentage')
 parser.add_option('--active', action='callback',
     callback=option_none, dest='active',
     help='active state for vBuckets')
@@ -664,10 +731,56 @@ parser.add_option('--node', action='callback',
     callback=option_none, dest='node',
     help='get couchbase statistics at node level')
 options, args = parser.parse_args()
+timestamp = str(int(time.time()))
+print timestamp
+url3 = ''.join(['http://', options.ip, ':', options.port,
+                       '/pools/default'])
+print  url3
+r = requests.get(url3, auth=(options.username, options.password))
+print r
+http_warnings(r.status_code)
+result3 = r.json()
+nodes = result3['nodes']
+thishost = 'none'
+for nodeiterator in nodes:
+    print nodeiterator
+    if 'thisNode' in nodeiterator:
+        thishost=nodeiterator['hostname']
+if thishost == 'none':
+   print 'Error in the hostname selection, exiting.'
+   sys.exit(4)
 
+dt = datetime.now()
+timestamp=str(int(round(time.time() * 1000-5000)))
+print timestamp, 'aaa'
+url2 = ''.join(['http://', options.ip, ':', options.port,
+                       '/_uistats?bucket=', options.bucket,'&haveTStamp=%7B%22',options.bucket,'%22:',
+                        timestamp,',%22@system%22:',timestamp,',%22@index%22:',timestamp,',%22@index-',
+                        options.bucket,'%22:',timestamp,',%22@query%22:',timestamp,',%22@xdcr-',
+                        options.bucket,'%22:0%7D&node=',thishost,'&zoom=minute'])
+print  url2
+r = requests.get(url2, auth=(options.username, options.password))
+print r
+http_warnings(r.status_code)
+result = r.json()
+which_argument(result)
 try:
     if options.node:
         which_argument(None)
+    elif options.hostindexram:
+        print 'caca'
+        url2 = ''.join(['http://', options.ip, ':', options.port,
+                       '/_uistats?bucket=', options.bucket,'&haveTStamp=%7B%22',options.bucket,'%22:',
+                        timestamp,',%22@system%22:',timestamp,',%22@index%22:',timestamp,',%22@index-',
+                        options.bucket,'%22:',timestamp,',%22@query%22:',timestamp,',%22@xdcr-',
+                        options.bucket,'%22:0%7D&node=',thishost,'&zoom=minute'])
+        print  url2
+        r = requests.get(url2, auth=(options.username, options.password))
+        print r
+        http_warnings(r.status_code)
+        result = r.json()
+        which_argument(result)
+        
     else:
         url = ''.join(['http://', options.ip, ':', options.port,
                        '/pools/default/buckets/', options.bucket,
@@ -677,7 +790,9 @@ try:
         result = r.json()
         which_argument(result)
 
+
 except Exception:
     print "Invalid option combination"
     print "Try '--help' for more information "
     sys.exit(2)
+
